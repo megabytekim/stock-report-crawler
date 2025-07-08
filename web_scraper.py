@@ -5,11 +5,11 @@ import os
 from urllib.parse import urljoin, quote
 import time
 
-page_number_start = 59
+page_number_start = 1
 
 # Loop through pages from 974 to 1
 # for page_number in range(974, 0, -1):
-for page_number in range(page_number_start, 90):
+for page_number in range(page_number_start, 30):
     # Update the target URL with the current page number
     target_url = f'https://finance.naver.com/research/company_list.naver?&page={page_number}'
     

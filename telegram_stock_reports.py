@@ -37,7 +37,9 @@ if TEST_MODE:
     TARGET_CHANNEL = os.getenv('TEST_TARGET_CHANNEL')
     print(f"[TEST MODE ENABLED] Using test target channel: {TARGET_CHANNEL}")
 else:
-    TARGET_CHANNEL = os.getenv('TARGET_CHANNEL')
+    # Use STOCK_REPORT_CHANNEL for production, fallback to TARGET_CHANNEL
+    TARGET_CHANNEL = os.getenv('STOCK_REPORT_CHANNEL') or os.getenv('TARGET_CHANNEL')
+    print(f"[PRODUCTION MODE] Using target channel: {TARGET_CHANNEL}")
 
 TIMEZONE = pytz.timezone('Asia/Seoul')
 
@@ -117,7 +119,7 @@ def scrape_yesterday_reports():
     reports = []
     page_number = 1
     consecutive_empty_pages = 0
-    max_consecutive_empty = 3  # Stop after 3 consecutive pages with no yesterday reports
+    max_consecutive_empty = 5  # Stop after 5 consecutive pages with no yesterday reports
     
     while True:
         target_url = f'https://finance.naver.com/research/company_list.naver?&page={page_number}'
