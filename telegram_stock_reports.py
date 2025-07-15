@@ -183,8 +183,6 @@ def scrape_yesterday_reports():
     yesterday_date = get_yesterday_date()
     print(f"Scraping reports for date: {yesterday_date}")
 
-    debug_point = 0
-    
     reports = []
     page_number = 1
     consecutive_empty_pages = 0
@@ -216,11 +214,6 @@ def scrape_yesterday_reports():
                     columns = row.find_all('td')
                     if len(columns) == 6:
                         company_name = columns[0].get_text(strip=True)
-                        if debug_point <= 0:
-                            if company_name == "넷마블":
-                                debug_point += 1
-                            continue
-                        
                         report_title = columns[1].get_text(strip=True)
                         research_firm = columns[2].get_text(strip=True)
                         pdf_link_tag = columns[3].find('a')
