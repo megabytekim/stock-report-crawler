@@ -7,6 +7,7 @@ import time
 from datetime import datetime, timedelta
 import pytz
 from telethon import TelegramClient
+from telethon.errors import FloodWaitError
 from dotenv import load_dotenv
 import logging
 import asyncio
@@ -14,6 +15,7 @@ import json
 from openai import OpenAI
 import PyPDF2
 import io
+import sys
 
 # Enable logging for debugging
 logging.basicConfig(level=logging.INFO)
@@ -45,6 +47,71 @@ TIMEZONE = pytz.timezone('Asia/Seoul')
 
 # Initialize client
 client = TelegramClient('stock_reports_session', API_ID, API_HASH)
+
+# Checkpoint file for resuming
+CHECKPOINT_FILE = 'report_checkpoint.json'
+
+# Checkpoint file structure:
+# {
+#   "date": "24.07.15",
+#   "reports": [
+#     {
+#       "company_name": "삼성전자",
+#       "report_title": "2Q24 실적 전망",
+#       "research_firm": "키움증권",
+#       "pdf_url": "https://...",
+#       "date": "24.07.15",
+#       "view_count": "1234"
+#     },
+#     ...
+#   ],
+#   "processed_indices": [0, 1, 2, 5, 8],
+#   "timestamp": "2024-07-15T10:30:00"
+# }
+
+def save_checkpoint(reports, processed_indices):
+    """Save checkpoint with reports and processed indices"""
+    checkpoint_data = {
+        'date': get_yesterday_date(),
+        'reports': reports,
+        'processed_indices': processed_indices,
+        'timestamp': datetime.now().isoformat()
+    }
+    try:
+        with open(CHECKPOINT_FILE, 'w', encoding='utf-8') as f:
+            json.dump(checkpoint_data, f, ensure_ascii=False, indent=2)
+        print(f"Checkpoint saved: {len(processed_indices)}/{len(reports)} reports processed")
+    except Exception as e:
+        print(f"Error saving checkpoint: {e}")
+
+def load_checkpoint():
+    """Load checkpoint if it exists and is for today"""
+    if not os.path.exists(CHECKPOINT_FILE):
+        return None, []
+    
+    try:
+        with open(CHECKPOINT_FILE, 'r', encoding='utf-8') as f:
+            checkpoint_data = json.load(f)
+        
+        # Check if checkpoint is for today
+        if checkpoint_data.get('date') == get_yesterday_date():
+            print(f"Found checkpoint for today: {len(checkpoint_data['processed_indices'])}/{len(checkpoint_data['reports'])} reports already processed")
+            return checkpoint_data['reports'], checkpoint_data['processed_indices']
+        else:
+            print("Checkpoint is for a different date, starting fresh")
+            return None, []
+    except Exception as e:
+        print(f"Error loading checkpoint: {e}")
+        return None, []
+
+def clear_checkpoint():
+    """Clear the checkpoint file"""
+    try:
+        if os.path.exists(CHECKPOINT_FILE):
+            os.remove(CHECKPOINT_FILE)
+            print("Checkpoint cleared")
+    except Exception as e:
+        print(f"Error clearing checkpoint: {e}")
 
 def get_yesterday_date():
     """Get yesterday's date in the format used by Naver Finance (YY.MM.DD)"""
@@ -115,6 +182,8 @@ def scrape_yesterday_reports():
     """Scrape yesterday's stock reports from Naver Finance"""
     yesterday_date = get_yesterday_date()
     print(f"Scraping reports for date: {yesterday_date}")
+
+    debug_point = 0
     
     reports = []
     page_number = 1
@@ -147,6 +216,11 @@ def scrape_yesterday_reports():
                     columns = row.find_all('td')
                     if len(columns) == 6:
                         company_name = columns[0].get_text(strip=True)
+                        if debug_point <= 0:
+                            if company_name == "넷마블":
+                                debug_point += 1
+                            continue
+                        
                         report_title = columns[1].get_text(strip=True)
                         research_firm = columns[2].get_text(strip=True)
                         pdf_link_tag = columns[3].find('a')
@@ -215,6 +289,20 @@ async def test_single_pdf_url(pdf_url, company_name="테스트 회사", report_t
             print("Error: Could not connect to Telegram. Please check your credentials.")
             return
         
+        # Get target channel entity once
+        try:
+            target_channel = await client.get_entity(TARGET_CHANNEL)
+            print(f"Connected to target channel: {TARGET_CHANNEL}")
+        except FloodWaitError as e:
+            wait_time = e.seconds
+            print(f"Rate limited when getting channel entity. Waiting {wait_time} seconds...")
+            await asyncio.sleep(wait_time)
+            target_channel = await client.get_entity(TARGET_CHANNEL)
+            print(f"Connected to target channel: {TARGET_CHANNEL}")
+        except Exception as e:
+            print(f"Error getting target channel entity: {e}")
+            return
+        
         # Create test report data
         test_report = {
             'company_name': company_name,
@@ -230,7 +318,7 @@ async def test_single_pdf_url(pdf_url, company_name="테스트 회사", report_t
         
         if report_summary:
             # Send to Telegram
-            await send_report_to_telegram(report_summary)
+            await send_report_to_telegram(report_summary, target_channel)
             print("Test completed successfully!")
         else:
             print("Test failed: Could not process the PDF")
@@ -282,7 +370,7 @@ async def download_and_summarize_report(report_data):
         print(f"Error processing report for {report_data['company_name']}: {e}")
         return None
 
-async def send_report_to_telegram(report_summary):
+async def send_report_to_telegram(report_summary, target_channel):
     """Send summarized report to Telegram channel"""
     try:
         # Format the message
@@ -301,7 +389,6 @@ async def send_report_to_telegram(report_summary):
         """.strip()
         
         # Send to target channel
-        target_channel = await client.get_entity(TARGET_CHANNEL)
         await client.send_message(target_channel, message, parse_mode='markdown')
         
         print(f"Sent report for {report_summary['company_name']} to Telegram")
@@ -309,6 +396,16 @@ async def send_report_to_telegram(report_summary):
         # Add delay to avoid rate limiting
         await asyncio.sleep(2)
         
+    except FloodWaitError as e:
+        wait_time = e.seconds
+        print(f"Rate limited by Telegram. Waiting {wait_time} seconds...")
+        await asyncio.sleep(wait_time)
+        # Retry once after waiting
+        try:
+            await client.send_message(target_channel, message, parse_mode='markdown')
+            print(f"Successfully sent report for {report_summary['company_name']} after waiting")
+        except Exception as retry_e:
+            print(f"Failed to send report after retry: {retry_e}")
     except Exception as e:
         print(f"Error sending report to Telegram: {e}")
 
@@ -324,41 +421,89 @@ async def process_yesterday_reports():
             print("Error: Could not connect to Telegram. Please check your credentials.")
             return
         
-        # Scrape yesterday's reports
-        reports = scrape_yesterday_reports()
-        
-        if not reports:
-            print("No yesterday reports found.")
-            # Send notification to Telegram
+        # Get target channel entity once
+        try:
             target_channel = await client.get_entity(TARGET_CHANNEL)
-            await client.send_message(target_channel, "📊 어제 등록된 새로운 투자 리포트가 없습니다.")
+            print(f"Connected to target channel: {TARGET_CHANNEL}")
+        except FloodWaitError as e:
+            wait_time = e.seconds
+            print(f"Rate limited when getting channel entity. Waiting {wait_time} seconds...")
+            await asyncio.sleep(wait_time)
+            target_channel = await client.get_entity(TARGET_CHANNEL)
+            print(f"Connected to target channel: {TARGET_CHANNEL}")
+        except Exception as e:
+            print(f"Error getting target channel entity: {e}")
             return
         
-        print(f"Processing {len(reports)} reports...")
+        # Try to load checkpoint first
+        reports, processed_indices = load_checkpoint()
         
-        # Process each report
-        for i, report in enumerate(reports, 1):
-            print(f"\nProcessing report {i}/{len(reports)}: {report['company_name']}")
+        if reports is None:
+            # No checkpoint found, scrape fresh reports
+            reports = scrape_yesterday_reports()
             
-            # Download and summarize
-            report_summary = await download_and_summarize_report(report)
+            if not reports:
+                print("No yesterday reports found.")
+                # Send notification to Telegram
+                await client.send_message(target_channel, "📊 어제 등록된 새로운 투자 리포트가 없습니다.")
+                return
             
-            if report_summary:
-                # Send to Telegram
-                await send_report_to_telegram(report_summary)
-            else:
-                print(f"Failed to process report for {report['company_name']}")
+            processed_indices = []
+            print(f"Found {len(reports)} new reports to process")
+        else:
+            print(f"Resuming from checkpoint: {len(processed_indices)}/{len(reports)} reports already processed")
+        
+        # Process remaining reports
+        remaining_reports = [i for i in range(len(reports)) if i not in processed_indices]
+        
+        if not remaining_reports:
+            print("All reports already processed!")
+            # Send completion message
+            await client.send_message(
+                target_channel, 
+                f"✅ 어제 등록된 {len(reports)}개 투자 리포트 처리 완료!"
+            )
+            # Clear checkpoint since we're done
+            clear_checkpoint()
+            return
+        
+        print(f"Processing {len(remaining_reports)} remaining reports...")
+        
+        # Process each remaining report
+        for i, report_index in enumerate(remaining_reports, 1):
+            report = reports[report_index]
+            print(f"\nProcessing report {report_index + 1}/{len(reports)}: {report['company_name']}")
             
-            # Add delay between reports
-            await asyncio.sleep(3)
+            try:
+                # Download and summarize
+                report_summary = await download_and_summarize_report(report)
+                
+                if report_summary:
+                    # Send to Telegram
+                    await send_report_to_telegram(report_summary, target_channel)
+                    
+                    # Mark as processed and save checkpoint
+                    processed_indices.append(report_index)
+                    save_checkpoint(reports, processed_indices)
+                else:
+                    print(f"Failed to process report for {report['company_name']}")
+                
+                # Add delay between reports
+                await asyncio.sleep(3)
+                
+            except Exception as e:
+                print(f"Error processing report {report_index + 1}: {e}")
+                print("Checkpoint saved. You can resume later by running the script again.")
+                return
         
         # Send completion message
-        target_channel = await client.get_entity(TARGET_CHANNEL)
         await client.send_message(
             target_channel, 
             f"✅ 어제 등록된 {len(reports)}개 투자 리포트 처리 완료!"
         )
         
+        # Clear checkpoint since we're done
+        clear_checkpoint()
         print("All reports processed successfully!")
         
     except Exception as e:
@@ -372,6 +517,29 @@ async def process_yesterday_reports():
 async def main():
     print("Starting stock report processing...")
     
+    # Handle command line arguments
+    if len(sys.argv) > 1:
+        if sys.argv[1] == '--clear-checkpoint':
+            clear_checkpoint()
+            print("Checkpoint cleared. Starting fresh...")
+        elif sys.argv[1] == '--help':
+            print("""
+Usage: python telegram_stock_reports.py [OPTIONS]
+
+Options:
+  --clear-checkpoint    Clear the checkpoint file and start fresh
+  --help               Show this help message
+
+Examples:
+  python telegram_stock_reports.py                    # Normal run (resumes if checkpoint exists)
+  python telegram_stock_reports.py --clear-checkpoint # Clear checkpoint and start fresh
+            """)
+            return
+        else:
+            print(f"Unknown argument: {sys.argv[1]}")
+            print("Use --help for usage information")
+            return
+    
     # Check if we should test with a single PDF URL
     test_pdf_url = os.getenv('TEST_PDF_URL')
     if test_pdf_url:
@@ -383,6 +551,7 @@ async def main():
         await process_yesterday_reports()
     except KeyboardInterrupt:
         print("\nScript interrupted by user")
+        print("Checkpoint saved. You can resume later by running the script again.")
     except Exception as e:
         print(f"Fatal error: {str(e)}")
         import traceback
